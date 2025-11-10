@@ -27,48 +27,6 @@ A Streamlit web application for merging SAP S/4HANA and ECC country master data 
 3. **Open in browser:**
    The app will open at `http://localhost:8501`
 
-## Deployment
-
-### Option 1: Streamlit Community Cloud (Recommended - FREE)
-
-**Steps:**
-
-1. **Push to GitHub:**
-   ```bash
-   cd ERP_Merge
-   git init
-   git add .
-   git commit -m "Initial commit"
-   git remote add origin https://github.com/YOUR_USERNAME/erp-merge-app.git
-   git push -u origin main
-   ```
-
-2. **Deploy:**
-   - Go to https://share.streamlit.io/
-   - Sign in with GitHub
-   - Click "New app"
-   - Select your repository: `YOUR_USERNAME/erp-merge-app`
-   - Main file: `erp_merge_app.py`
-   - Click "Deploy"
-
-Your app will be live at: `https://YOUR-APP-NAME.streamlit.app`
-
-### Option 2: Render (FREE tier)
-
-1. Create account at https://render.com
-2. New Web Service → Connect GitHub repo
-3. Settings:
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `streamlit run erp_merge_app.py --server.port=$PORT --server.address=0.0.0.0`
-4. Deploy
-
-### Option 3: Railway (FREE tier)
-
-1. Create account at https://railway.app
-2. New Project → Deploy from GitHub
-3. Add start command: `streamlit run erp_merge_app.py --server.port=$PORT`
-4. Deploy
-
 ## Project Structure
 
 ```
