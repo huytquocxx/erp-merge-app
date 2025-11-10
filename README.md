@@ -93,18 +93,16 @@ ERP_Merge/
 2. **Preview Data:** Review the loaded data
 3. **Run Merge:** 
    - Select key fields for matching
-   - Select country name column (for MDmapping)
+   - Review the MDmapping column preview
    - Execute merge
 4. **Results & Downloads:** View results and download Excel files
 
 ## Output Files
 
 - **MDtable.xlsx:** Unique records with S4 priority
-- **MDmapping.xlsx:** All records with columns:
-  - MDGKey
-  - ERPSystem (S4 or ECC)
-  - ERPcountryID
-  - ERPcountryName
+- **MDmapping.xlsx:** All records with every source column (largest schema) prefixed with `ERP` (e.g., `ERPDivision`), plus:
+  - `MDGKey`
+  - `ERPSystem` (S4 or ECC)
 
 ## License
 

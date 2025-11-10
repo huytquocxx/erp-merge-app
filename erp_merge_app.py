@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import io
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Optional
 import openpyxl
 
 # Page configuration
@@ -94,7 +94,12 @@ def load_excel_from_url(url: str) -> pd.DataFrame:
         if 'html' in content_type or response.content[:2] == b'<!':
             raise ValueError("URL returned HTML instead of Excel file. Make sure the file is publicly accessible or use the export link.")
         
-        return pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
+        return pd.read_excel(
+            io.BytesIO(response.content),
+            engine='openpyxl',
+            dtype=str,
+            keep_default_na=False
+        )
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching file from URL: {str(e)}")
         raise
@@ -106,7 +111,12 @@ def load_excel_from_url(url: str) -> pd.DataFrame:
 def load_excel_from_upload(uploaded_file) -> pd.DataFrame:
     """Load Excel file from Streamlit upload."""
     try:
-        return pd.read_excel(uploaded_file, engine='openpyxl')
+        return pd.read_excel(
+            uploaded_file,
+            engine='openpyxl',
+            dtype=str,
+            keep_default_na=False
+        )
     except Exception as e:
         st.error(f"Error reading uploaded Excel file: {str(e)}")
         raise
@@ -161,15 +171,15 @@ def validate_dataframe(df: pd.DataFrame, source_name: str, required_columns: lis
 
 
 def merge_erp_data(s4_df: pd.DataFrame, ecc_df: pd.DataFrame, 
-                   key_fields: list = ['Country/Region Key'],
-                   country_name_col: str = None) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+                   key_fields: Optional[List[str]] = None,
+                   column_prefix: str = 'ERP') -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Merge S4 and ECC ERP master data.
     
     Args:
         s4_df: S4 master data DataFrame
         ecc_df: ECC master data DataFrame
-        key_fields: List of key fields for matching (default: ['Country/Region Key'])
+        key_fields: List of key fields for matching (required)
     
     Returns:
         md_table: Unique records with S4 priority
@@ -236,62 +246,55 @@ def merge_erp_data(s4_df: pd.DataFrame, ecc_df: pd.DataFrame,
     else:
         md_table = pd.DataFrame()
     
-    # Build MDmapping: All records from both sources with specific columns
-    # Identify country ID and name columns
-    country_id_col = key_fields[0] if key_fields else 'Country/Region Key'
-    
-    # Try to find country name column if not provided
-    if country_name_col is None:
-        possible_name_cols = ['Country/Region Name', 'Name', 'Country Name', 'Country/Region']
-        all_cols = set(s4_df.columns) | set(ecc_df.columns) if not (s4_df.empty and ecc_df.empty) else set()
-        
-        for col in possible_name_cols:
-            if col in all_cols:
-                country_name_col = col
-                break
-        
-        # If no standard name column found, use first non-key column or empty
-        if country_name_col is None and all_cols:
-            non_key_cols = [c for c in all_cols if c not in key_fields and c not in ['_normalized_key', '_source', 'MDGKey']]
-            country_name_col = non_key_cols[0] if non_key_cols else None
-    
-    # Build MDmapping records
+    # Build MDmapping: include all columns from both sources with prefix
+    helper_columns = {'_normalized_key', '_source', 'MDGKey'}
+    all_source_columns = set()
+    if not s4_df.empty:
+        all_source_columns.update(s4_df.columns)
+    if not ecc_df.empty:
+        all_source_columns.update(ecc_df.columns)
+
+    data_columns = sorted([col for col in all_source_columns if col not in helper_columns])
+    prefixed_columns = [f"{column_prefix}{col}" for col in data_columns]
+
     md_mapping_records = []
-    
-    # Process S4 records
+
+    def build_record(row: pd.Series, system: str) -> Dict[str, Any]:
+        record = {
+            'MDGKey': row.get('MDGKey', ''),
+            'ERPSystem': system
+        }
+        for col, prefixed in zip(data_columns, prefixed_columns):
+            value = row.get(col, '')
+            if pd.isna(value):
+                value = ''
+            record[prefixed] = value
+        return record
+
     if not s4_df.empty:
         for _, row in s4_df.iterrows():
-            record = {
-                'MDGKey': row.get('MDGKey', ''),
-                'ERPSystem': 'S4',
-                'ERPcountryID': row.get(country_id_col, '') if country_id_col in row else '',
-                'ERPcountryName': row.get(country_name_col, '') if country_name_col and country_name_col in row else ''
-            }
-            md_mapping_records.append(record)
-    
-    # Process ECC records
+            md_mapping_records.append(build_record(row, 'S4'))
+
     if not ecc_df.empty:
         for _, row in ecc_df.iterrows():
-            record = {
-                'MDGKey': row.get('MDGKey', ''),
-                'ERPSystem': 'ECC',
-                'ERPcountryID': row.get(country_id_col, '') if country_id_col in row else '',
-                'ERPcountryName': row.get(country_name_col, '') if country_name_col and country_name_col in row else ''
-            }
-            md_mapping_records.append(record)
-    
-    # Create MDmapping DataFrame
+            md_mapping_records.append(build_record(row, 'ECC'))
+
     if md_mapping_records:
         md_mapping = pd.DataFrame(md_mapping_records)
+        md_mapping = md_mapping[['MDGKey', 'ERPSystem'] + prefixed_columns]
     else:
-        md_mapping = pd.DataFrame(columns=['MDGKey', 'ERPSystem', 'ERPcountryID', 'ERPcountryName'])
-    
+        md_mapping = pd.DataFrame(columns=['MDGKey', 'ERPSystem'] + prefixed_columns)
+ 
     # Clean up temporary columns from md_table only
     if not md_table.empty:
         if '_normalized_key' in md_table.columns:
             md_table.drop(columns=['_normalized_key'], inplace=True)
         if '_source' in md_table.columns:
             md_table.drop(columns=['_source'], inplace=True)
+        # Ensure MDGKey is the first column
+        if 'MDGKey' in md_table.columns:
+            remaining_cols = [c for c in md_table.columns if c != 'MDGKey']
+            md_table = md_table[['MDGKey'] + remaining_cols]
     
     # Build validation summary
     validation_summary = {
@@ -299,13 +302,14 @@ def merge_erp_data(s4_df: pd.DataFrame, ecc_df: pd.DataFrame,
         'ecc_count': len(ecc_df),
         'mdtable_count': len(md_table),
         'mdmapping_count': len(md_mapping),
-        'overlapping_codes': len(overlapping_keys),
-        's4_only_codes': len(s4_only_keys),
-        'ecc_only_codes': len(ecc_only_keys),
+        'overlapping_key_count': len(overlapping_keys),
+        's4_only_key_count': len(s4_only_keys),
+        'ecc_only_key_count': len(ecc_only_keys),
         'overlapping_keys_list': sorted(list(overlapping_keys)),
         's4_only_keys_list': sorted(list(s4_only_keys)),
         'ecc_only_keys_list': sorted(list(ecc_only_keys)),
-        'key_fields_used': key_fields
+        'key_fields_used': key_fields,
+        'mdmapping_columns': ['MDGKey', 'ERPSystem'] + prefixed_columns
     }
     
     return md_table, md_mapping, validation_summary
@@ -323,7 +327,7 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
 # Main App
 def main():
     st.markdown('<div class="main-header">📊 ERP Master Data Merger (S4 vs ECC)</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Upload or link your SAP S/4HANA and ECC country master data files to generate consolidated outputs.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Upload or link your SAP S/4HANA and ECC master data files to generate consolidated outputs.</div>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'md_table' not in st.session_state:
@@ -333,7 +337,7 @@ def main():
     if 'validation_summary' not in st.session_state:
         st.session_state.validation_summary = None
     if 'key_fields' not in st.session_state:
-        st.session_state.key_fields = ['Country/Region Key']
+        st.session_state.key_fields = []
     
     # Sidebar for navigation
     with st.sidebar:
@@ -359,7 +363,7 @@ def main():
             st.subheader("S4 Master Data")
             if upload_option == "Upload files":
                 s4_file = st.file_uploader(
-                    "Upload S4_Country.xlsx",
+                    "Upload S4 dataset (Excel)",
                     type=["xlsx", "xls"],
                     key="s4_upload"
                 )
@@ -377,7 +381,7 @@ def main():
             st.subheader("ECC Master Data")
             if upload_option == "Upload files":
                 ecc_file = st.file_uploader(
-                    "Upload ECC_Country.xlsx",
+                    "Upload ECC dataset (Excel)",
                     type=["xlsx", "xls"],
                     key="ecc_upload"
                 )
@@ -531,71 +535,32 @@ def main():
             st.write(ecc_cols if ecc_cols else "None")
         
         # Multi-select for key fields - Make it very visible
-        default_key_fields = st.session_state.key_fields if 'key_fields' in st.session_state else ['Country/Region Key']
-        # Filter default to only include columns that exist
-        default_key_fields = [kf for kf in default_key_fields if kf in all_available_cols]
-        if not default_key_fields and all_available_cols:
-            default_key_fields = [all_available_cols[0]]  # Use first available column as default
-        
+        existing_selection = st.session_state.get('key_field_selector', st.session_state.get('key_fields', []))
+        existing_selection = [kf for kf in existing_selection if kf in all_available_cols]
+        if not existing_selection and all_available_cols:
+            existing_selection = [all_available_cols[0]]
+
         st.markdown("#### **Select Key Fields:**")
         selected_key_fields = st.multiselect(
             "Choose columns to use for matching records (you can select multiple):",
             options=all_available_cols,
-            default=default_key_fields,
+            default=existing_selection,
             help="Select one or more columns that uniquely identify records. Records will be matched based on these fields (case-insensitive).",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key="key_field_selector"
         )
-        
+
         # Store selected key fields in session state
+        st.session_state.key_fields = selected_key_fields
+
         if selected_key_fields:
-            st.session_state.key_fields = selected_key_fields
             st.success(f"✅ **Selected Key Fields:** {', '.join(selected_key_fields)}")
         else:
             st.error("⚠️ **Please select at least one key field to proceed.**")
             st.stop()
         
         st.markdown("---")
-        
-        # Country Name Column Selection (for MDmapping)
-        st.subheader("🌍 Country Name Column (for MDmapping)")
-        st.write("Select the column to use for **ERPcountryName** in the MDmapping output.")
-        
-        # Auto-detect country name column
-        possible_name_cols = ['Country/Region Name', 'Name', 'Country Name', 'Country/Region']
-        all_cols_list = list(all_available_cols)
-        detected_name_col = None
-        
-        for col in possible_name_cols:
-            if col in all_cols_list:
-                detected_name_col = col
-                break
-        
-        # If no standard name column found, use first non-key column
-        if detected_name_col is None and all_cols_list:
-            non_key_cols = [c for c in all_cols_list if c not in selected_key_fields]
-            detected_name_col = non_key_cols[0] if non_key_cols else None
-        
-        # Store in session state
-        if 'country_name_col' not in st.session_state:
-            st.session_state.country_name_col = detected_name_col
-        
-        selected_country_name_col = st.selectbox(
-            "Select Country Name Column:",
-            options=[''] + all_cols_list,
-            index=all_cols_list.index(detected_name_col) + 1 if detected_name_col and detected_name_col in all_cols_list else 0,
-            help="This column will be used as ERPcountryName in the MDmapping output. Auto-detected if left empty.",
-            key="country_name_select"
-        )
-        
-        # Use selected or auto-detected
-        final_country_name_col = selected_country_name_col if selected_country_name_col else detected_name_col
-        if final_country_name_col:
-            st.info(f"📌 Using **{final_country_name_col}** for ERPcountryName")
-            st.session_state.country_name_col = final_country_name_col
-        else:
-            st.warning("⚠️ No country name column selected. ERPcountryName will be empty in MDmapping.")
-            st.session_state.country_name_col = None
-        
+        st.info("ℹ️ MDmapping output will include every column from your source files with an `ERP` prefix (e.g., `ERPDivision`), alongside `MDGKey` and `ERPSystem`.")
         st.markdown("---")
         
         # Validation
@@ -623,10 +588,8 @@ def main():
         if st.button("🚀 Run Merge Process", type="primary", use_container_width=True):
             with st.spinner("Processing merge..."):
                 try:
-                    # Get country name column from session state or use None for auto-detection
-                    country_name_col = st.session_state.get('country_name_col', None)
                     md_table, md_mapping, validation_summary = merge_erp_data(
-                        s4_df, ecc_df, selected_key_fields, country_name_col=country_name_col
+                        s4_df, ecc_df, selected_key_fields
                     )
                     
                     # Store results in session state
@@ -651,25 +614,25 @@ def main():
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Overlapping Codes", validation_summary['overlapping_codes'])
+                        st.metric("Matching Keys", validation_summary['overlapping_key_count'])
                     with col2:
-                        st.metric("S4-Only Codes", validation_summary['s4_only_codes'])
+                        st.metric("S4-Only Keys", validation_summary['s4_only_key_count'])
                     with col3:
-                        st.metric("ECC-Only Codes", validation_summary['ecc_only_codes'])
+                        st.metric("ECC-Only Keys", validation_summary['ecc_only_key_count'])
                     
                     # Show overlapping keys
                     if validation_summary['overlapping_keys_list']:
-                        with st.expander("📋 View Overlapping Country Keys"):
+                        with st.expander("📋 View Matching Keys"):
                             st.write(validation_summary['overlapping_keys_list'])
                     
                     # Show S4-only keys
                     if validation_summary['s4_only_keys_list']:
-                        with st.expander("📋 View S4-Only Country Keys"):
+                        with st.expander("📋 View S4-Only Keys"):
                             st.write(validation_summary['s4_only_keys_list'])
                     
                     # Show ECC-only keys
                     if validation_summary['ecc_only_keys_list']:
-                        with st.expander("📋 View ECC-Only Country Keys"):
+                        with st.expander("📋 View ECC-Only Keys"):
                             st.write(validation_summary['ecc_only_keys_list'])
                     
                 except Exception as e:
@@ -696,10 +659,13 @@ def main():
         with tab1:
             st.write(f"**Total Rows:** {len(md_table)}")
             st.dataframe(md_table, use_container_width=True, height=400)
-        
+            st.caption(f"Columns: {', '.join(md_table.columns.astype(str))}")
+ 
         with tab2:
             st.write(f"**Total Rows:** {len(md_mapping)}")
             st.dataframe(md_mapping, use_container_width=True, height=400)
+            mapping_columns = validation_summary.get('mdmapping_columns', list(md_mapping.columns))
+            st.caption(f"Columns: {', '.join(mapping_columns)}")
         
         # Download section
         st.subheader("📥 Download Results")
@@ -750,9 +716,9 @@ def main():
 - MDmapping Records: {validation_summary['mdmapping_count']}
 
 **Key Analysis:**
-- Overlapping Codes: {validation_summary['overlapping_codes']}
-- S4-Only Codes: {validation_summary['s4_only_codes']}
-- ECC-Only Codes: {validation_summary['ecc_only_codes']}
+- Matching Keys: {validation_summary['overlapping_key_count']}
+- S4-Only Keys: {validation_summary['s4_only_key_count']}
+- ECC-Only Keys: {validation_summary['ecc_only_key_count']}
 """
             st.code(summary_text, language="text")
 
